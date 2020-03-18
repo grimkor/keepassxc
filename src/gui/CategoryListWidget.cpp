@@ -209,7 +209,8 @@ void CategoryListWidgetDelegate::paint(QPainter* painter,
 
     int paddingTop = fontRect.height() < 30 ? 15 : 10;
     int left = opt.rect.left() + opt.rect.width() / 2 - iconSize.width() / 2;
-    painter->drawPixmap(left, opt.rect.top() + paddingTop, icon.pixmap(iconSize));
+    auto mode = opt.state & QStyle::StateFlag::State_Selected ? QIcon::Selected : QIcon::Normal;
+    painter->drawPixmap(left, opt.rect.top() + paddingTop, icon.pixmap(iconSize, mode));
 
     painter->restore();
 }
