@@ -65,6 +65,10 @@
 #include "fdosecrets/FdoSecretsPlugin.h"
 #endif
 
+#ifdef WITH_XC_YUBIKEY
+#include "keys/drivers/YubiKey.h"
+#endif
+
 #ifdef WITH_XC_BROWSER
 #include "browser/BrowserOptionDialog.h"
 #include "browser/BrowserSettings.h"
@@ -219,6 +223,11 @@ MainWindow::MainWindow()
     connect(fdoSS, &FdoSecretsPlugin::requestShowNotification, this, &MainWindow::displayDesktopNotification);
     fdoSS->updateServiceState();
     m_ui->settingsWidget->addSettingsPage(fdoSS);
+#endif
+
+#ifdef WITH_XC_YUBIKEY
+    connect(YubiKey::instance(), SIGNAL(userInteractionRequest()), SLOT(showYubiKeyPopup()), Qt::QueuedConnection);
+    connect(YubiKey::instance(), SIGNAL(challengeCompleted()), SLOT(hideYubiKeyPopup()), Qt::QueuedConnection);
 #endif
 
     setWindowIcon(resources()->applicationIcon());

@@ -17,6 +17,10 @@
 
 #include "Utils.h"
 
+#ifdef WITH_XC_YUBIKEY
+#include "keys/YkChallengeResponseKeyCLI.h"
+#endif
+
 #ifdef Q_OS_WIN
 #include <windows.h>
 #else
@@ -159,25 +163,30 @@ namespace Utils
 
 #ifdef WITH_XC_YUBIKEY
         if (!yubiKeySlot.isEmpty()) {
+            unsigned int serial = 0;
+            int slot;
+
             bool ok = false;
-            int slot = yubiKeySlot.toInt(&ok, 10);
+            auto parts = yubiKeySlot.split(":");
+            slot = parts[0].toInt(&ok);
+
             if (!ok || (slot != 1 && slot != 2)) {
-                err << QObject::tr("Invalid YubiKey slot %1").arg(yubiKeySlot) << endl;
+                err << QObject::tr("Invalid YubiKey slot %1").arg(parts[0]) << endl;
                 return {};
             }
 
-            QString errorMessage;
-            bool blocking = YubiKey::instance()->checkSlotIsBlocking(slot, errorMessage);
-            if (!errorMessage.isEmpty()) {
-                err << errorMessage << endl;
-                return {};
+            if (parts.size() > 1) {
+                serial = parts[1].toUInt(&ok, 10);
+                if (!ok) {
+                    err << QObject::tr("Invalid YubiKey serial %1").arg(parts[1]) << endl;
+                    return {};
+                }
             }
 
-            auto key = QSharedPointer<YkChallengeResponseKeyCLI>(new YkChallengeResponseKeyCLI(
-                slot,
-                blocking,
-                QObject::tr("Please touch the button on your YubiKey to unlock %1").arg(databaseFilename),
-                outputDescriptor));
+            auto key = QSharedPointer<YkChallengeResponseKeyCLI>(
+                new YkChallengeResponseKeyCLI({serial, slot},
+                                              QObject::tr("Please touch the button on your YubiKey to continue..."),
+                                              errorDescriptor));
             compositeKey->addChallengeResponseKey(key);
         }
 #else

@@ -32,17 +32,18 @@ class YkChallengeResponseKeyCLI : public QObject, public ChallengeResponseKey
 public:
     static QUuid UUID;
 
-    explicit YkChallengeResponseKeyCLI(int slot, bool blocking, QString messageInteraction, FILE* outputDescriptor);
+    explicit YkChallengeResponseKeyCLI(YubiKeySlot keySlot, QString interactionMessage, FILE* outputDescriptor);
 
     QByteArray rawKey() const override;
     bool challenge(const QByteArray& challenge) override;
-    bool challenge(const QByteArray& challenge, unsigned int retries);
+
+private slots:
+    void showInteractionMessage();
 
 private:
     QByteArray m_key;
-    int m_slot;
-    bool m_blocking;
-    QString m_messageInteraction;
+    YubiKeySlot m_keySlot;
+    QString m_interactionMessage;
     FILE* m_out;
 };
 

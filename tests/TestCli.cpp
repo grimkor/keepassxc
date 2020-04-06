@@ -59,6 +59,7 @@
 #include <QFile>
 #include <QFuture>
 #include <QSet>
+#include <QSignalSpy>
 #include <QTextStream>
 #include <QtConcurrent>
 
@@ -2096,32 +2097,56 @@ void TestCli::testInvalidDbFiles()
 /**
  * Secret key for the YubiKey slot used by the unit test is
  * 1c e3 0f d7 8d 20 dc fa 40 b5 0c 18 77 9a fb 0f 02 28 8d b7
- * This secret should be configured at slot 2, and the slot
- * should be configured as passive.
+ * This secret can be on either slot but must be passive.
  */
 void TestCli::testYubiKeyOption()
 {
-    if (!YubiKey::instance()->init()) {
-        QSKIP("Unable to connect to YubiKey");
+    if (!YubiKey::instance()->isInitialized()) {
+        QSKIP("Unable to initialize YubiKey interface.");
     }
 
-    QString errorMessage;
-    bool isBlocking = YubiKey::instance()->checkSlotIsBlocking(2, errorMessage);
-    if (isBlocking && errorMessage.isEmpty()) {
-        QSKIP("Skipping YubiKey in press mode.");
+    YubiKey::instance()->findValidKeys();
+
+    // Wait for the hardware to respond
+    QSignalSpy detected(YubiKey::instance(), SIGNAL(detectComplete(bool)));
+    QTRY_VERIFY_WITH_TIMEOUT(detected.count() > 0, 2000);
+
+    auto keys = YubiKey::instance()->foundKeys();
+    if (keys.isEmpty()) {
+        QSKIP("No YubiKey devices were detected.");
     }
 
+    bool passive = false;
     QByteArray challenge("CLITest");
     QByteArray response;
-    YubiKey::instance()->challenge(2, false, challenge, response);
     QByteArray expected("\xA2\x3B\x94\x00\xBE\x47\x9A\x30\xA9\xEB\x50\x9B\x85\x56\x5B\x6B\x30\x25\xB4\x8E", 20);
-    QVERIFY2(response == expected, "YubiKey Slot 2 is not configured with correct secret key.");
+
+    QPair<unsigned int, int> pKey(0, 0);
+    for (auto key : keys) {
+        if (YubiKey::instance()->getDisplayName(key).contains("Passive")) {
+            passive = true;
+            YubiKey::instance()->challenge(key, challenge, response);
+            if (response == expected) {
+                pKey = key;
+                break;
+            }
+            Tools::wait(100);
+        }
+    }
+
+    if (!passive) {
+        /* Testing active mode in unit tests is unreasonable */
+        QSKIP("No YubiKey contains a slot in passive mode.");
+    }
+
+    QVERIFY2(pKey.first != 0, "YubiKey is not configured with the correct secret key.");
 
     List listCmd;
     Add addCmd;
 
+    auto keyParam = QString("%1:%2").arg(pKey.second).arg(pKey.first);
     Utils::Test::setNextPassword("a");
-    listCmd.execute({"ls", "-y", "2", m_yubiKeyProtectedDbFile->fileName()});
+    listCmd.execute({"ls", "-y", keyParam, m_yubiKeyProtectedDbFile->fileName()});
     m_stdoutFile->reset();
     m_stderrFile->reset();
     m_stdoutFile->readLine(); // skip password prompt
@@ -2143,7 +2168,7 @@ void TestCli::testYubiKeyOption()
     QCOMPARE(m_stderrFile->readLine(),
              QByteArray("If this reoccurs, then your database file may be corrupt. (HMAC mismatch)\n"));
 
-    // Should raise an error if yubikey slot is not a string
+    // Should raise an error if yubikey slot is not a number
     pos = m_stdoutFile->pos();
     posErr = m_stderrFile->pos();
     Utils::Test::setNextPassword("a");
@@ -2164,6 +2189,17 @@ void TestCli::testYubiKeyOption()
     m_stderrFile->seek(posErr);
     QCOMPARE(m_stdoutFile->readAll(), QByteArray(""));
     QCOMPARE(m_stderrFile->readAll().split(':').at(0), QByteArray("Invalid YubiKey slot 3\n"));
+
+    // Should raise an error if yubikey serial is not a number
+    pos = m_stdoutFile->pos();
+    posErr = m_stderrFile->pos();
+    Utils::Test::setNextPassword("a");
+    listCmd.execute({"ls", "-y", "1:badserial", m_yubiKeyProtectedDbFile->fileName()});
+    m_stdoutFile->seek(pos);
+    m_stdoutFile->readLine(); // skip password prompt
+    m_stderrFile->seek(posErr);
+    QCOMPARE(m_stdoutFile->readAll(), QByteArray(""));
+    QCOMPARE(m_stderrFile->readAll().split(':').at(0), QByteArray("Invalid YubiKey serial badserial\n"));
 }
 
 namespace

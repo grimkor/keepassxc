@@ -37,7 +37,6 @@
 #include <QDesktopServices>
 #include <QFont>
 #include <QSharedPointer>
-#include <QtConcurrentRun>
 
 DatabaseOpenWidget::DatabaseOpenWidget(QWidget* parent)
     : DialogyWidget(parent)
@@ -78,7 +77,18 @@ DatabaseOpenWidget::DatabaseOpenWidget(QWidget* parent)
     sp.setRetainSizeWhenHidden(true);
     m_ui->yubikeyProgress->setSizePolicy(sp);
 
-    connect(m_ui->buttonRedetectYubikey, SIGNAL(clicked()), SLOT(pollYubikey()));
+    connect(m_ui->buttonRedetectYubikey, SIGNAL(clicked()), SLOT(pollHardwareKey()));
+    connect(YubiKey::instance(), SIGNAL(detectComplete(bool)), SLOT(hardwareKeyResponse(bool)), Qt::QueuedConnection);
+
+    connect(YubiKey::instance(), &YubiKey::userInteractionRequest, this, [this] {
+        // Show the press notification if we are in an independent window (e.g., DatabaseOpenDialog)
+        if (window() != getMainWindow()) {
+            m_ui->messageWidget->showMessage(tr("Please touch the button on your YubiKey!"),
+                                             MessageWidget::Information,
+                                             MessageWidget::DisableAutoHide);
+        }
+    });
+    connect(YubiKey::instance(), &YubiKey::challengeCompleted, this, [this] { m_ui->messageWidget->hide(); });
 #else
     m_ui->hardwareKeyLabel->setVisible(false);
     m_ui->hardwareKeyLabelHelp->setVisible(false);
@@ -104,37 +114,16 @@ void DatabaseOpenWidget::showEvent(QShowEvent* event)
 {
     DialogyWidget::showEvent(event);
     m_ui->editPassword->setFocus();
-
-#ifdef WITH_XC_YUBIKEY
-    // showEvent() may be called twice, so make sure we are only polling once
-    if (!m_yubiKeyBeingPolled) {
-        // clang-format off
-        connect(YubiKey::instance(), SIGNAL(detected(int,bool)), SLOT(yubikeyDetected(int,bool)), Qt::QueuedConnection);
-        connect(YubiKey::instance(), SIGNAL(detectComplete()), SLOT(yubikeyDetectComplete()), Qt::QueuedConnection);
-        connect(YubiKey::instance(), SIGNAL(notFound()), SLOT(noYubikeyFound()), Qt::QueuedConnection);
-        // clang-format on
-
-        pollYubikey();
-        m_yubiKeyBeingPolled = true;
-    }
-#endif
 }
 
 void DatabaseOpenWidget::hideEvent(QHideEvent* event)
 {
     DialogyWidget::hideEvent(event);
 
-#ifdef WITH_XC_YUBIKEY
-    // Don't listen to any Yubikey events if we are hidden
-    disconnect(YubiKey::instance(), nullptr, this, nullptr);
-    m_yubiKeyBeingPolled = false;
-#endif
-
-    if (isVisible()) {
-        return;
+    // Clear the forms if we are minimized
+    if (!isVisible()) {
+        clearForms();
     }
-
-    clearForms();
 }
 
 void DatabaseOpenWidget::load(const QString& filename)
@@ -148,7 +137,7 @@ void DatabaseOpenWidget::load(const QString& filename)
     m_keyFileComboEdited = false;
 
     if (config()->get("RememberLastKeyFiles").toBool()) {
-        QHash<QString, QVariant> lastKeyFiles = config()->get("LastKeyFiles").toHash();
+        auto lastKeyFiles = config()->get("LastKeyFiles").toHash();
         if (lastKeyFiles.contains(m_filename)) {
             m_ui->comboKeyFile->addItem(lastKeyFiles[m_filename].toString());
             m_ui->comboKeyFile->setCurrentIndex(1);
@@ -157,6 +146,17 @@ void DatabaseOpenWidget::load(const QString& filename)
 
     QHash<QString, QVariant> useTouchID = config()->get("UseTouchID").toHash();
     m_ui->checkTouchID->setChecked(useTouchID.value(m_filename, false).toBool());
+
+#ifdef WITH_XC_YUBIKEY
+    // Only auto-poll for hardware keys if we previously used one with this database file
+    if (config()->get("RememberLastKeyFiles").toBool()) {
+        auto variant = config()->get("LastChallengeResponse");
+        auto lastChallengeResponse = config()->get("LastChallengeResponse").toHash();
+        if (lastChallengeResponse.contains(m_filename)) {
+            pollHardwareKey();
+        }
+    }
+#endif
 }
 
 void DatabaseOpenWidget::clearForms()
@@ -176,6 +176,11 @@ QSharedPointer<Database> DatabaseOpenWidget::database()
     return m_db;
 }
 
+QString DatabaseOpenWidget::filename()
+{
+    return m_filename;
+}
+
 void DatabaseOpenWidget::enterKey(const QString& pw, const QString& keyFile)
 {
     m_ui->editPassword->setText(pw);
@@ -186,6 +191,8 @@ void DatabaseOpenWidget::enterKey(const QString& pw, const QString& keyFile)
 
 void DatabaseOpenWidget::openDatabase()
 {
+    m_ui->messageWidget->hide();
+
     QSharedPointer<CompositeKey> masterKey = databaseKey();
     if (!masterKey) {
         return;
@@ -223,11 +230,6 @@ void DatabaseOpenWidget::openDatabase()
 
         config()->set("UseTouchID", useTouchID);
 #endif
-
-        if (m_ui->messageWidget->isVisible()) {
-            m_ui->messageWidget->animatedHide();
-        }
-
         emit dialogFinished(true);
         m_isOpeningDatabase = false;
         clearForms();
@@ -293,7 +295,7 @@ QSharedPointer<CompositeKey> DatabaseOpenWidget::databaseKey()
     }
 #endif
 
-    QHash<QString, QVariant> lastKeyFiles = config()->get("LastKeyFiles").toHash();
+    auto lastKeyFiles = config()->get("LastKeyFiles").toHash();
     lastKeyFiles.remove(m_filename);
 
     auto key = QSharedPointer<FileKey>::create();
@@ -315,14 +317,14 @@ QSharedPointer<CompositeKey> DatabaseOpenWidget::databaseKey()
             legacyWarning.setDefaultButton(QMessageBox::Ok);
             legacyWarning.setCheckBox(new QCheckBox(tr("Don't show this warning again")));
 
-            connect(legacyWarning.checkBox(), &QCheckBox::stateChanged, [](int state) {
+            connect(legacyWarning.checkBox(), &QCheckBox::stateChanged, this, [](int state) {
                 config()->set("Messages/NoLegacyKeyFileWarning", state == Qt::CheckState::Checked);
             });
 
             legacyWarning.exec();
         }
         masterKey->addKey(key);
-        lastKeyFiles[m_filename] = keyFilename;
+        lastKeyFiles.insert(m_filename, keyFilename);
     }
 
     if (config()->get("RememberLastKeyFiles").toBool()) {
@@ -330,19 +332,17 @@ QSharedPointer<CompositeKey> DatabaseOpenWidget::databaseKey()
     }
 
 #ifdef WITH_XC_YUBIKEY
-    QHash<QString, QVariant> lastChallengeResponse = config()->get("LastChallengeResponse").toHash();
+    auto lastChallengeResponse = config()->get("LastChallengeResponse").toHash();
     lastChallengeResponse.remove(m_filename);
 
     int selectionIndex = m_ui->comboChallengeResponse->currentIndex();
     if (selectionIndex > 0) {
-        int comboPayload = m_ui->comboChallengeResponse->itemData(selectionIndex).toInt();
-
-        // read blocking mode from LSB and slot index number from second LSB
-        bool blocking = comboPayload & 1;
-        int slot = comboPayload >> 1;
-        auto crKey = QSharedPointer<YkChallengeResponseKey>(new YkChallengeResponseKey(slot, blocking));
+        auto slot = m_ui->comboChallengeResponse->itemData(selectionIndex).value<YubiKeySlot>();
+        auto crKey = QSharedPointer<YkChallengeResponseKey>(new YkChallengeResponseKey(slot));
         masterKey->addChallengeResponseKey(crKey);
-        lastChallengeResponse[m_filename] = true;
+
+        // Qt doesn't read custom types in settings so stuff into a QString
+        lastChallengeResponse.insert(m_filename, QString("%1:%2").arg(slot.first).arg(slot.second));
     }
 
     if (config()->get("RememberLastKeyFiles").toBool()) {
@@ -400,45 +400,62 @@ void DatabaseOpenWidget::handleKeyFileComboChanged()
     m_ui->keyFileClearIcon->setVisible(m_keyFileComboEdited);
 }
 
-void DatabaseOpenWidget::pollYubikey()
+void DatabaseOpenWidget::pollHardwareKey()
 {
+    if (m_yubiKeyBeingPolled) {
+        return;
+    }
+
+    m_ui->comboChallengeResponse->clear();
+    m_ui->comboChallengeResponse->addItem(tr("Detecting Hardware Keys..."));
+
     m_ui->buttonRedetectYubikey->setEnabled(false);
     m_ui->comboChallengeResponse->setEnabled(false);
-    m_ui->comboChallengeResponse->clear();
-    m_ui->comboChallengeResponse->addItem(tr("Select slot..."), -1);
     m_ui->yubikeyProgress->setVisible(true);
+    m_yubiKeyBeingPolled = true;
 
-    // YubiKey init is slow, detect asynchronously to not block the UI
-    QtConcurrent::run(YubiKey::instance(), &YubiKey::detect);
+    YubiKey::instance()->findValidKeys();
 }
 
-void DatabaseOpenWidget::yubikeyDetected(int slot, bool blocking)
+void DatabaseOpenWidget::hardwareKeyResponse(bool found)
 {
-    YkChallengeResponseKey yk(slot, blocking);
-    // add detected YubiKey to combo box and encode blocking mode in LSB, slot number in second LSB
-    m_ui->comboChallengeResponse->addItem(yk.getName(), QVariant((slot << 1) | blocking));
+    m_ui->comboChallengeResponse->clear();
+    m_ui->buttonRedetectYubikey->setEnabled(true);
+    m_ui->yubikeyProgress->setVisible(false);
+    m_yubiKeyBeingPolled = false;
 
+    if (!found) {
+        m_ui->comboChallengeResponse->addItem(tr("No Hardware Keys Detected"));
+        m_ui->comboChallengeResponse->setEnabled(false);
+        return;
+    } else {
+        m_ui->comboChallengeResponse->addItem(tr("Select Hardware Key..."));
+    }
+
+    YubiKeySlot lastUsedSlot;
     if (config()->get("RememberLastKeyFiles").toBool()) {
-        QHash<QString, QVariant> lastChallengeResponse = config()->get("LastChallengeResponse").toHash();
+        auto lastChallengeResponse = config()->get("LastChallengeResponse").toHash();
         if (lastChallengeResponse.contains(m_filename)) {
-            m_ui->comboChallengeResponse->setCurrentIndex(1);
+            // Qt doesn't read custom types in settings so extract from QString
+            auto split = lastChallengeResponse.value(m_filename).toString().split(":");
+            if (split.size() > 1) {
+                lastUsedSlot = YubiKeySlot(split[0].toUInt(), split[1].toInt());
+            }
         }
     }
-}
 
-void DatabaseOpenWidget::yubikeyDetectComplete()
-{
+    int selectedIndex = 0;
+    for (auto& slot : YubiKey::instance()->foundKeys()) {
+        // add detected YubiKey to combo box
+        m_ui->comboChallengeResponse->addItem(YubiKey::instance()->getDisplayName(slot), QVariant::fromValue(slot));
+        // Select this YubiKey + Slot if we used it in the past
+        if (lastUsedSlot == slot) {
+            selectedIndex = m_ui->comboChallengeResponse->count() - 1;
+        }
+    }
+
+    m_ui->comboChallengeResponse->setCurrentIndex(selectedIndex);
     m_ui->comboChallengeResponse->setEnabled(true);
-    m_ui->buttonRedetectYubikey->setEnabled(true);
-    m_ui->yubikeyProgress->setVisible(false);
-    m_yubiKeyBeingPolled = false;
-}
-
-void DatabaseOpenWidget::noYubikeyFound()
-{
-    m_ui->buttonRedetectYubikey->setEnabled(true);
-    m_ui->yubikeyProgress->setVisible(false);
-    m_yubiKeyBeingPolled = false;
 }
 
 void DatabaseOpenWidget::openHardwareKeyHelp()

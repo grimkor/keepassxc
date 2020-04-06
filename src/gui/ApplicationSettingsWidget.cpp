@@ -374,6 +374,7 @@ void ApplicationSettingsWidget::saveSettings()
 
     if (!config()->get("RememberLastKeyFiles").toBool()) {
         config()->set("LastKeyFiles", {});
+        config()->set("LastChallengeResponse", {});
         config()->set("LastDir", "");
     }
 
