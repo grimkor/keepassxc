@@ -1123,6 +1123,36 @@ void MainWindow::changeEvent(QEvent* event)
     }
 }
 
+bool MainWindow::focusNextPrevChild(bool next)
+{
+    // Only navigate around the main window if the database widget is showing the entry view
+    auto dbWidget = m_ui->tabWidget->currentDatabaseWidget();
+    if (dbWidget && dbWidget->isVisible() && dbWidget->isEntryViewActive()) {
+        // Search Widget <-> Tab Widget <-> DbWidget
+        if (next) {
+            if (m_searchWidget->hasFocus()) {
+                m_ui->tabWidget->setFocus(Qt::TabFocusReason);
+            } else if (m_ui->tabWidget->hasFocus()) {
+                dbWidget->setFocus(Qt::TabFocusReason);
+            } else {
+                m_searchWidget->setFocus(Qt::TabFocusReason);
+            }
+        } else {
+            if (m_searchWidget->hasFocus()) {
+                dbWidget->setFocus(Qt::BacktabFocusReason);
+            } else if (m_ui->tabWidget->hasFocus()) {
+                m_searchWidget->setFocus(Qt::BacktabFocusReason);
+            } else {
+                m_ui->tabWidget->setFocus(Qt::BacktabFocusReason);
+            }
+        }
+        return true;
+    }
+
+    // Defer to Qt to make a decision, this maintains normal behavior
+    return QMainWindow::focusNextPrevChild(next);
+}
+
 void MainWindow::saveWindowInformation()
 {
     if (isVisible()) {
